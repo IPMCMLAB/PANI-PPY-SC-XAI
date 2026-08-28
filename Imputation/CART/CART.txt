@@ -1,0 +1,284 @@
+
+library(readxl)    
+library(mice)      
+library(openxlsx)  
+library(rpart)     
+
+
+input_path <- "D:/CuratedDataset.xlsx"
+output_dir <- "D:/"
+
+n_imp  <- 5       # Number of imputed datasets
+n_iter <- 20       # Number of MICE iterations
+seed   <- 123
+
+data <- read_excel(input_path)
+data <- as.data.frame(data)
+
+required_vars <- c(
+  "Monomer", "SSA", "AMR", "BR", "CR", "OMR",
+  "Dopant", "Template", "Oxidant",
+  "Electrolyteclass", "ACN", "Molarity", "PW",
+  "Configuration", "CD", "Capacitance"
+)
+
+missing_required <- setdiff(required_vars, names(data))
+
+if (length(missing_required) > 0) {
+  stop(
+    "The following required columns are missing from the dataset: ",
+    paste(missing_required, collapse = ", ")
+  )
+}
+
+
+miss_AMR <- is.na(data$AMR)
+miss_BR  <- is.na(data$BR)
+miss_CR  <- is.na(data$CR)
+
+miss_comp <- which(miss_AMR | miss_BR | miss_CR)
+
+
+factor_vars <- c(
+  "Monomer",
+  "Template",
+  "Dopant",
+  "Oxidant",
+  "Electrolyteclass",
+  "Configuration"
+)
+
+data[factor_vars] <- lapply(data[factor_vars], as.factor)
+
+
+md.pattern(data)
+
+
+ini  <- mice(data, maxit = 0, printFlag = FALSE)
+pred <- ini$predictorMatrix
+meth <- ini$method
+
+
+meth["Capacitance"] <- ""
+
+pred[, "Capacitance"] <- 0
+pred["Capacitance", ] <- 0
+
+
+impute_vars <- c("SSA", "AMR", "BR", "CR", "OMR")
+meth[impute_vars] <- "cart"
+
+fixed_vars <- c(
+  "Monomer",
+  "Dopant",
+  "Template",
+  "Oxidant",
+  "Electrolyteclass",
+  "ACN",
+  "Molarity",
+  "PW",
+  "Configuration",
+  "CD"
+)
+
+meth[fixed_vars] <- ""
+
+
+set.seed(seed)
+
+imp <- mice(
+  data,
+  maxit = n_iter,
+  m = n_imp,
+  method = meth,
+  predictorMatrix = pred,
+  printFlag = TRUE
+)
+
+
+nearest_valid_missing_composition <- function(raw, target, step = 5) {
+  
+  raw <- as.numeric(raw)
+  target <- as.numeric(target)
+  
+  if (any(is.na(raw))) {
+    stop("MICE returned NA for one or more composition values.")
+  }
+  
+  if (is.na(target)) {
+    stop("Cannot repair composition because the target sum is NA.")
+  }
+  
+  if (target < -1e-8) {
+    stop(
+      "Observed AMR/BR/CR cells in at least one partially missing row ",
+      "already sum to more than 100. Cannot repair without changing observed data."
+    )
+  }
+  
+  target <- max(target, 0)
+  k <- length(raw)
+  
+      if (abs(target / step - round(target / step)) < 1e-8) {
+    
+    target_units <- round(target / step)
+    
+    if (k == 1) {
+      return(c(target))
+    }
+    
+    if (k == 2) {
+      a <- 0:target_units
+      candidates <- cbind(a, target_units - a) * step
+    } else if (k == 3) {
+      candidates <- do.call(
+        rbind,
+        lapply(0:target_units, function(a) {
+          b <- 0:(target_units - a)
+          cbind(a, b, target_units - a - b)
+        })
+      ) * step
+    } else {
+           rounded <- pmax(round(raw / step) * step, 0)
+      diff <- target - sum(rounded)
+      rounded[which.max(rounded)] <- rounded[which.max(rounded)] + diff
+      return(rounded)
+    }
+    
+    raw_matrix <- matrix(
+      raw,
+      nrow = nrow(candidates),
+      ncol = length(raw),
+      byrow = TRUE
+    )
+    
+    best_index <- which.min(rowSums((candidates - raw_matrix)^2))
+    best <- candidates[best_index, ]
+    
+    return(as.numeric(best))
+  }
+  
+  rent file.
+  rounded <- pmax(round(raw / step) * step, 0)
+  diff <- target - sum(rounded)
+  adjust_idx <- which.max(rounded)
+  rounded[adjust_idx] <- rounded[adjust_idx] + diff
+  
+    if (any(rounded < -1e-8)) {
+    positive_raw <- pmax(raw, 0)
+    
+    if (sum(positive_raw) > 0) {
+      rounded <- positive_raw / sum(positive_raw) * target
+    } else {
+      rounded <- rep(target / length(raw), length(raw))
+    }
+  }
+  
+  return(rounded)
+}
+
+adjust_composition_cellwise <- function(
+  amr, br, cr,
+  miss_amr, miss_br, miss_cr
+) {
+  
+  vals <- c(AMR = amr, BR = br, CR = cr)
+  miss <- c(AMR = miss_amr, BR = miss_br, CR = miss_cr)
+  
+   if (!any(miss)) {
+    return(vals)
+  }
+  
+    if (any(is.na(vals[!miss]))) {
+    stop("An observed composition cell is unexpectedly NA.")
+  }
+  
+  observed_sum <- sum(vals[!miss])
+  missing_target <- 100 - observed_sum
+  
+  vals[miss] <- nearest_valid_missing_composition(
+    raw = vals[miss],
+    target = missing_target,
+    step = 5
+  )
+  
+  
+  vals[abs(vals) < 1e-8] <- 0
+  
+  return(vals)
+}
+
+observed_cells_unchanged <- function(after, before, observed_mask, tolerance = 1e-8) {
+  all(abs(as.numeric(after[observed_mask]) - as.numeric(before[observed_mask])) <= tolerance)
+}
+
+
+
+for (i in seq_len(imp$m)) {
+  
+  # Extract the i-th imputed dataset
+  imputed_i <- complete(imp, action = i)
+  
+
+  if (length(miss_comp) > 0) {
+    
+    comp <- t(mapply(
+      adjust_composition_cellwise,
+      imputed_i$AMR[miss_comp],
+      imputed_i$BR[miss_comp],
+      imputed_i$CR[miss_comp],
+      miss_AMR[miss_comp],
+      miss_BR[miss_comp],
+      miss_CR[miss_comp]
+    ))
+    
+    colnames(comp) <- c("AMR", "BR", "CR")
+    
+    imputed_i[miss_comp, c("AMR", "BR", "CR")] <- comp
+  }
+  
+
+  stopifnot(observed_cells_unchanged(imputed_i$AMR, data$AMR, !miss_AMR))
+  stopifnot(observed_cells_unchanged(imputed_i$BR,  data$BR,  !miss_BR))
+  stopifnot(observed_cells_unchanged(imputed_i$CR,  data$CR,  !miss_CR))
+  
+
+  if (length(miss_comp) > 0) {
+    comp_sums <- rowSums(imputed_i[miss_comp, c("AMR", "BR", "CR")])
+    stopifnot(all(abs(comp_sums - 100) < 1e-8))
+    stopifnot(all(imputed_i[miss_comp, c("AMR", "BR", "CR")] >= -1e-8))
+  }
+  
+
+  stopifnot(all(colSums(is.na(imputed_i[impute_vars])) == 0))
+  
+
+  output_path <- file.path(output_dir, paste0("DatasetICART", i, ".xlsx"))
+  
+  write.xlsx(
+    imputed_i,
+    file = output_path,
+    overwrite = TRUE
+  )
+  
+
+  cat("\n============================================================\n")
+  cat("Summary for DatasetICART", i, "\n", sep = "")
+  cat("============================================================\n")
+  
+  print(summary(imputed_i[c("SSA", "AMR", "BR", "CR", "OMR")]))
+  
+  if (length(miss_comp) > 0) {
+    cat("\nCheck AMR + BR + CR for originally incomplete composition rows:\n")
+    print(table(rowSums(imputed_i[miss_comp, c("AMR", "BR", "CR")])))
+  }
+  
+  cat("\nSaved to: ", output_path, "\n", sep = "")
+}
+
+
+cat(
+  "\nAll ", imp$m,
+  " imputed datasets have been successfully generated and saved.\n",
+  sep = ""
+)

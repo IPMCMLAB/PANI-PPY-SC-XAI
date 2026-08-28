@@ -68,9 +68,7 @@ Missing numerical values were imputed in R using multiple imputation by chained 
 - Predictive mean matching (PMM)
 - Classification and regression trees (CART)
 
-Five completed datasets were generated with each method using 20 MICE iterations. The imputation workflow preserves observed values and constrains imputed AMR, BR, and CR values so that the electrode-composition fractions sum to 100%.
-
-The PMM and CART scripts contain user-specific input and output paths. These paths must be updated before the scripts are run on another system.
+Five completed datasets were generated with each method using 20 MICE iterations. 
 
 ## Machine-learning workflow
 
